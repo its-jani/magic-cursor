@@ -1,0 +1,68 @@
+# ROLE & GOAL
+You are a Principal Rust Systems Engineer and Windows API Specialist. 
+Your goal is to build a hyper-lightweight, high-performance background utility for Windows 10 and Windows 11 called "MagicCursor-Win". 
+This application replicates AI cursor capabilities by listening system-wide for a configurable global shortcut or mouse "wiggle" gesture, capturing clipboard text or cropped screen regions, presenting a minimalist UI overlay near the cursor, and forwarding context to a user-configured REST API (OpenAI, Gemini, Anthropic, or custom local/remote LLM endpoint).
+
+The key constraint is RESOURCE EFFICIENCY: The background process must idle under 0.1% CPU and < 20MB RAM.
+
+---
+
+# TECH STACK & DEPENDENCIES
+- Language: Rust 2021 Edition
+- Platform Target: x86_64-pc-windows-msvc (Windows 10 / Windows 11)
+- Windows API: `windows-sys` or `windows` crate (v0.52+) for low-level Win32 integration
+- Async Runtime: `tokio` (minimal features: `rt-multi-thread`, `macros`, `time`, `sync`)
+- Networking: `reqwest` (with native-tls or rustls, json support)
+- Serialization: `serde`, `serde_json`
+- Clipboard & Capture: `arboard` for clipboard operations; Win32 GDI / BitBlt for localized screen cropping
+- Hotkeys & Hooks: Win32 `RegisterHotKey` for reliable shortcuts, `SetWindowsHookExW` (`WH_MOUSE_LL`) for opt-in wiggle detection
+- UI Overlay: `egui` via `eframe` (configured with `low_power_mode = true`), or native Win32 windowing
+
+---
+
+# ARCHITECTURE & CORE MODULES
+
+### 1. Trigger Engine (`src/input/trigger.rs`)
+- **Primary:** System-wide global hotkey registration (`RegisterHotKey`, default: `Alt + G` or `Win + Alt + Space`).
+- **Secondary (Opt-in):** Low-level Win32 mouse hook (`WH_MOUSE_LL`) for wiggle detection:
+  - Track pointer positions in a 300ms sliding time window.
+  - Require at least 4 rapid direction reversals within 250ms exceeding a spatial threshold.
+  - Offload heavy calculations to keep the low-level hook callback under 1ms to prevent cursor lag.
+
+### 2. Context Capture Engine (`src/context/capture.rs`)
+- Upon activation:
+  1. Inspect clipboard for highlighted text or images using `arboard`.
+  2. If clipboard is empty or unreadable, execute a silent, localized screen capture centered at cursor coordinates `(Mouse_X, Mouse_Y)` (e.g., 600x400px region).
+  3. Encode image payloads as Base64 strings for Vision LLM endpoints.
+
+### 3. API & Engine Client (`src/ai/client.rs`)
+- Support configurable JSON endpoints stored in `%APPDATA%\MagicCursor\config.toml`.
+- Provide built-in payload mappings for:
+  - OpenAI Compatible API (`/v1/chat/completions`)
+  - Google Gemini API (`v1beta/models/...:generateContent`)
+  - Anthropic Messages API (`/v1/messages`)
+- Handle network calls asynchronously via `tokio` channels so UI rendering remains smooth and unblocked.
+
+### 4. HUD UI Overlay (`src/ui/overlay.rs`)
+- Render a borderless, always-on-top overlay appearing directly beside the cursor `(Mouse_X + 15, Mouse_Y + 15)`.
+- Features:
+  - Auto-focused text prompt box.
+  - Visual badge showing context type (`[Text Attached]` or `[Screen Region Captured]`).
+  - Streaming Markdown text renderer for response output.
+  - Auto-close on `Esc` or click-outside events.
+
+### 5. System Integration & Configuration (`src/main.rs`)
+- System Tray icon providing `Settings`, `Pause`, and `Exit`.
+- Configuration schema (`config.toml`):
+  ```toml
+  [general]
+  activation_mode = "hotkey" # "hotkey", "wiggle", or "both"
+  hotkey = "Alt+G"
+  wiggle_sensitivity = 5
+
+  [api]
+  provider = "openai"
+  api_key = "YOUR_API_KEY_HERE"
+  endpoint = "[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)"
+  model = "gpt-4o-mini"
+  system_prompt = "You are a concise desktop assistant operating directly under the user's cursor. Provide brief, actionable answers."
