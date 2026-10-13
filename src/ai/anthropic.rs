@@ -3,15 +3,14 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc::Sender;
 
-use super::client::StreamChunk;
+use super::client::{MultiSelectionContext, SelectedClip, StreamChunk};
 use crate::config::ApiConfig;
-use crate::context::CapturedContext;
 
 pub async fn stream_anthropic(
     client: &Client,
     config: &ApiConfig,
     prompt: &str,
-    context: &CapturedContext,
+    context: &MultiSelectionContext,
     tx: Sender<StreamChunk>,
 ) -> Result<(), String> {
     let endpoint = if config.endpoint.is_empty()
@@ -22,48 +21,61 @@ pub async fn stream_anthropic(
         &config.endpoint
     };
 
+    let model = if config.model.is_empty() {
+        "claude-3-5-sonnet-20241022"
+    } else {
+        &config.model
+    };
+
     let mut user_content = Vec::new();
 
-    match context {
-        CapturedContext::Empty => {
-            user_content.push(json!({
-                "type": "text",
-                "text": prompt
-            }));
-        }
-        CapturedContext::Text(t) => {
-            let combined = format!(
-                "--- ATTACHED CLIPBOARD/TEXT CONTEXT ---\n{}\n----------------------------------------\n\nUser Request: {}",
-                t, prompt
-            );
-            user_content.push(json!({
-                "type": "text",
-                "text": combined
-            }));
-        }
-        CapturedContext::Image(img) => {
-            user_content.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": img.base64_png
-                }
-            }));
-            let prompt_text = if prompt.trim().is_empty() {
-                "Analyze this screen region and assist concisely."
-            } else {
-                prompt
-            };
-            user_content.push(json!({
-                "type": "text",
-                "text": prompt_text
-            }));
+    if let Some(ref meta) = context.app_context {
+        user_content.push(json!({
+            "type": "text",
+            "text": format!("Target Application / Screen Context: {}", meta)
+        }));
+    }
+
+    for (idx, clip) in context.items.iter().enumerate() {
+        match clip {
+            SelectedClip::Text { title, content } => {
+                user_content.push(json!({
+                    "type": "text",
+                    "text": format!("--- Clip #{} [{}] ---\n{}\n--------------------------", idx + 1, title, content)
+                }));
+            }
+            SelectedClip::Image {
+                title, base64_png, ..
+            } => {
+                user_content.push(json!({
+                    "type": "text",
+                    "text": format!("[Image Clip #{}: {}]", idx + 1, title)
+                }));
+                user_content.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64_png
+                    }
+                }));
+            }
         }
     }
 
+    let final_prompt = if prompt.trim().is_empty() {
+        "Analyze the attached items and provide a concise response."
+    } else {
+        prompt
+    };
+
+    user_content.push(json!({
+        "type": "text",
+        "text": final_prompt
+    }));
+
     let mut payload = json!({
-        "model": config.model,
+        "model": model,
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
         "stream": true,

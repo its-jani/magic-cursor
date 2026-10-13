@@ -3,15 +3,14 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc::Sender;
 
-use super::client::StreamChunk;
+use super::client::{MultiSelectionContext, SelectedClip, StreamChunk};
 use crate::config::ApiConfig;
-use crate::context::CapturedContext;
 
 pub async fn stream_gemini(
     client: &Client,
     config: &ApiConfig,
     prompt: &str,
-    context: &CapturedContext,
+    context: &MultiSelectionContext,
     tx: Sender<StreamChunk>,
 ) -> Result<(), String> {
     let base_url = if config.endpoint.is_empty()
@@ -22,39 +21,56 @@ pub async fn stream_gemini(
         config.endpoint.trim_end_matches('/')
     };
 
+    let model = if config.model.is_empty() || config.model == "gpt-4o-mini" {
+        "gemini-2.0-flash"
+    } else {
+        &config.model
+    };
+
     let url = format!(
         "{}/models/{}:streamGenerateContent?key={}&alt=sse",
-        base_url, config.model, config.api_key
+        base_url, model, config.api_key
     );
 
     let mut parts = Vec::new();
 
-    match context {
-        CapturedContext::Empty => {
-            parts.push(json!({ "text": prompt }));
-        }
-        CapturedContext::Text(t) => {
-            let combined = format!(
-                "--- ATTACHED CLIPBOARD/TEXT CONTEXT ---\n{}\n----------------------------------------\n\nUser Request: {}",
-                t, prompt
-            );
-            parts.push(json!({ "text": combined }));
-        }
-        CapturedContext::Image(img) => {
-            parts.push(json!({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": img.base64_png
-                }
-            }));
-            let prompt_text = if prompt.trim().is_empty() {
-                "Analyze this screen region and assist concisely."
-            } else {
-                prompt
-            };
-            parts.push(json!({ "text": prompt_text }));
+    // Attach system/process metadata if present
+    if let Some(ref meta) = context.app_context {
+        parts.push(json!({
+            "text": format!("Target Application / Screen Context: {}", meta)
+        }));
+    }
+
+    // Attach multi-selection clips
+    for (idx, clip) in context.items.iter().enumerate() {
+        match clip {
+            SelectedClip::Text { title, content } => {
+                parts.push(json!({
+                    "text": format!("--- Clip #{} [{}] ---\n{}\n--------------------------", idx + 1, title, content)
+                }));
+            }
+            SelectedClip::Image {
+                title, base64_png, ..
+            } => {
+                parts.push(json!({
+                    "text": format!("[Image Clip #{}: {}]", idx + 1, title)
+                }));
+                parts.push(json!({
+                    "inline_data": {
+                        "mime_type": "image/png",
+                        "data": base64_png
+                    }
+                }));
+            }
         }
     }
+
+    let final_prompt = if prompt.trim().is_empty() {
+        "Analyze the selected screen items and provide a clear, concise summary."
+    } else {
+        prompt
+    };
+    parts.push(json!({ "text": final_prompt }));
 
     let mut payload = json!({
         "contents": [

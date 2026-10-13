@@ -3,4 +3,4 @@ pub mod client;
 pub mod gemini;
 pub mod openai;
 
-pub use client::{AiClient, StreamChunk};
+pub use client::{AiClient, MultiSelectionContext, SelectedClip, StreamChunk};

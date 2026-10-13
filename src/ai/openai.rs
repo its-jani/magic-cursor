@@ -3,67 +3,90 @@ use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc::Sender;
 
-use super::client::StreamChunk;
+use super::client::{MultiSelectionContext, SelectedClip, StreamChunk};
 use crate::config::ApiConfig;
-use crate::context::CapturedContext;
 
 pub async fn stream_openai(
     client: &Client,
     config: &ApiConfig,
     prompt: &str,
-    context: &CapturedContext,
+    context: &MultiSelectionContext,
     tx: Sender<StreamChunk>,
 ) -> Result<(), String> {
     let mut messages = Vec::new();
 
     // System prompt
-    if !config.system_prompt.is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": config.system_prompt
+    let system_text = if config.system_prompt.is_empty() {
+        "You are MagicCursor, a high-speed desktop AI assistant operating under the user's cursor. Provide concise, clear, and actionable responses."
+    } else {
+        &config.system_prompt
+    };
+
+    messages.push(json!({
+        "role": "system",
+        "content": system_text
+    }));
+
+    // Build user content parts
+    let mut user_parts = Vec::new();
+
+    if let Some(ref meta) = context.app_context {
+        user_parts.push(json!({
+            "type": "text",
+            "text": format!("Target Application / Screen Context: {}", meta)
         }));
     }
 
-    // User message with context
-    match context {
-        CapturedContext::Empty => {
-            messages.push(json!({
-                "role": "user",
-                "content": prompt
-            }));
-        }
-        CapturedContext::Text(captured_text) => {
-            let combined = format!(
-                "--- ATTACHED CLIPBOARD/TEXT CONTEXT ---\n{}\n----------------------------------------\n\nUser Request: {}",
-                captured_text, prompt
-            );
-            messages.push(json!({
-                "role": "user",
-                "content": combined
-            }));
-        }
-        CapturedContext::Image(img) => {
-            let data_url = format!("data:image/png;base64,{}", img.base64_png);
-            messages.push(json!({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": if prompt.trim().is_empty() { "Analyze the attached screen region and summarize what is visible or answer any implicit question." } else { prompt }
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": data_url
-                        }
+    for (idx, clip) in context.items.iter().enumerate() {
+        match clip {
+            SelectedClip::Text { title, content } => {
+                user_parts.push(json!({
+                    "type": "text",
+                    "text": format!("--- Clip #{} [{}] ---\n{}\n--------------------------", idx + 1, title, content)
+                }));
+            }
+            SelectedClip::Image {
+                title, base64_png, ..
+            } => {
+                let data_url = format!("data:image/png;base64,{}", base64_png);
+                user_parts.push(json!({
+                    "type": "text",
+                    "text": format!("[Image Clip #{}: {}]", idx + 1, title)
+                }));
+                user_parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": data_url
                     }
-                ]
-            }));
+                }));
+            }
         }
     }
 
+    let final_prompt = if prompt.trim().is_empty() {
+        "Analyze the selected items and provide a clear, concise summary."
+    } else {
+        prompt
+    };
+
+    user_parts.push(json!({
+        "type": "text",
+        "text": final_prompt
+    }));
+
+    messages.push(json!({
+        "role": "user",
+        "content": user_parts
+    }));
+
+    let model = if config.model.is_empty() {
+        "gpt-4o"
+    } else {
+        &config.model
+    };
+
     let payload = json!({
-        "model": config.model,
+        "model": model,
         "messages": messages,
         "stream": true,
         "temperature": config.temperature,

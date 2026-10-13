@@ -1,9 +1,10 @@
 #![windows_subsystem = "windows"]
 
 pub mod ai;
+pub mod automation;
+pub mod capture;
 pub mod config;
-pub mod context;
-pub mod input;
+pub mod hooks;
 pub mod tray;
 pub mod ui;
 
@@ -19,18 +20,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use ai::AiClient;
+use automation::UIAutomationExtractor;
+use capture::capture_full_screen;
 use config::Config;
-use context::{capture_active_context, get_current_cursor_pos};
-use input::hotkey::{HotkeyDefinition, HotkeyManager};
-use input::wiggle::WiggleDetectorHandle;
-use input::{TriggerEvent, TriggerSource};
+use hooks::mouse_keyboard::{
+    get_current_cursor_pos, HotkeyDefinition, HotkeyManager, TriggerEvent, TriggerSource,
+    WiggleDetectorHandle,
+};
 use tray::{
     TrayIcon, ID_TRAY_EXIT, ID_TRAY_OPEN_CONFIG, ID_TRAY_OPEN_FOLDER, ID_TRAY_TOGGLE_PAUSE,
     ID_TRAY_TRIGGER, WM_TRAY_CALLBACK,
 };
-use ui::show_overlay_window;
+use ui::show_magic_overlay;
 
-const HOTKEY_ID: i32 = 101;
+const PRIMARY_HOTKEY_ID: i32 = 101;
+const FALLBACK_HOTKEY_ID: i32 = 102;
 
 static GLOBAL_TX: Mutex<Option<Sender<TriggerEvent>>> = Mutex::new(None);
 
@@ -42,7 +46,8 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match msg {
         WM_HOTKEY => {
-            if (wparam.0 as i32) == HOTKEY_ID && !TrayIcon::is_paused() {
+            let id = wparam.0 as i32;
+            if (id == PRIMARY_HOTKEY_ID || id == FALLBACK_HOTKEY_ID) && !TrayIcon::is_paused() {
                 let (x, y) = get_current_cursor_pos();
                 if let Ok(guard) = GLOBAL_TX.lock() {
                     if let Some(ref tx) = *guard {
@@ -128,7 +133,7 @@ fn open_file_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn main() {
-    // 1. Initialize background Tokio runtime for async LLM calls
+    // 1. Initialize background Tokio runtime for async LLM and network streaming
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -137,7 +142,7 @@ fn main() {
 
     let _rt_guard = rt.enter();
 
-    // 2. Load or create config
+    // 2. Load or create user configuration (%APPDATA%\MagicCursor\config.toml)
     let (config, _config_path) = Config::load_or_create();
     let config_arc = Arc::new(config);
 
@@ -175,25 +180,24 @@ fn main() {
         .expect("Failed to create background message window")
     };
 
-    // 5. Create Tray Icon
-    let _tray = TrayIcon::new(hwnd, "MagicCursor-Win (Alt+G)");
+    // 5. Create System Tray Icon
+    let _tray = TrayIcon::new(hwnd, "Magic Cursor (Win+Shift+G / Wiggle)");
 
-    // 6. Register Hotkey
+    // 6. Register Global Hotkeys
     let mode = config_arc.general.activation_mode.to_lowercase();
     let hotkey_enabled = mode == "hotkey" || mode == "both";
     let wiggle_enabled = mode == "wiggle" || mode == "both";
 
-    let mut hotkey_mgr = HotkeyManager::new(hwnd, HOTKEY_ID);
+    let mut hotkey_mgr = HotkeyManager::new(hwnd);
     if hotkey_enabled {
-        if let Some(def) = HotkeyDefinition::parse(&config_arc.general.hotkey) {
-            let registered = hotkey_mgr.register(&def);
-            if !registered {
-                eprintln!(
-                    "[MagicCursor] Warning: Failed to register hotkey '{}'",
-                    config_arc.general.hotkey
-                );
-            }
-        }
+        // Register configured or default hotkey (Win+Shift+G)
+        let primary_def = HotkeyDefinition::parse(&config_arc.general.hotkey)
+            .unwrap_or_else(HotkeyDefinition::default_magic);
+        let _ = hotkey_mgr.register(PRIMARY_HOTKEY_ID, &primary_def);
+
+        // Also register fallback shortcut (Ctrl+Alt+G)
+        let fallback_def = HotkeyDefinition::fallback_magic();
+        let _ = hotkey_mgr.register(FALLBACK_HOTKEY_ID, &fallback_def);
     }
 
     // 7. Start Mouse Wiggle Detector if configured
@@ -208,29 +212,33 @@ fn main() {
         None
     };
 
-    // 8. Spawn background worker to handle triggers and display HUD overlay
+    // 8. Spawn background worker to handle triggers, capture screen, and display overlay
     let worker_config = Arc::clone(&config_arc);
     std::thread::Builder::new()
-        .name("magic-overlay-worker".into())
+        .name("magic-cursor-overlay-worker".into())
         .spawn(move || {
             let ai_client = AiClient::new();
+            let uia_extractor = UIAutomationExtractor::new();
 
             while let Ok(event) = trigger_rx.recv() {
                 if TrayIcon::is_paused() {
                     continue;
                 }
 
-                // Capture clipboard or screen context around cursor
-                let context = capture_active_context(
-                    &worker_config,
+                // A. Instant sub-10ms DXGI Desktop Duplication frame grab
+                let captured_frame = capture_full_screen();
+
+                // B. Query Windows UI Automation elements near cursor
+                let hotspots = uia_extractor.extract_hotspots_near_cursor(
                     event.cursor_x,
                     event.cursor_y,
                 );
 
-                // Show eframe overlay window
-                show_overlay_window(
+                // C. Launch interactive Magic Pointer overlay
+                show_magic_overlay(
                     (*worker_config).clone(),
-                    context,
+                    captured_frame,
+                    hotspots,
                     (event.cursor_x, event.cursor_y),
                     ai_client.clone(),
                 );
@@ -238,7 +246,7 @@ fn main() {
         })
         .expect("Failed to spawn overlay worker");
 
-    // 9. Standard Windows Message Loop (Puts thread to 0% CPU sleep while idle)
+    // 9. Standard Windows Message Loop (Puts main thread to 0.0% CPU sleep while idle)
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

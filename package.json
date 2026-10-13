@@ -1,0 +1,42 @@
+{
+  "name": "@its-jani/magic-cursor",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight Windows Magic Pointer clone in Rust",
+  "main": "bin/cli.js",
+  "bin": {
+    "magic-cursor": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "target/release/magic-cursor.exe",
+    "README.md"
+  ],
+  "scripts": {
+    "setup": "node bin/cli.js setup",
+    "start": "node bin/cli.js start",
+    "status": "node bin/cli.js status",
+    "stop": "node bin/cli.js stop",
+    "config": "node bin/cli.js config"
+  },
+  "keywords": [
+    "magic-cursor",
+    "windows",
+    "rust",
+    "mcp",
+    "rea",
+    "ai",
+    "gemini"
+  ],
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "author": "MagicCursor Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/its-jani/magic-cursor"
+  }
+}

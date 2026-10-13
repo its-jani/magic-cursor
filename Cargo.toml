@@ -1,12 +1,16 @@
 [package]
-name = "magic-cursor-win"
+name = "magic-cursor"
 version = "0.1.0"
 edition = "2021"
 authors = ["MagicCursor Team"]
-description = "Hyper-lightweight, high-performance background AI cursor utility for Windows"
+description = "Hyper-lightweight, high-performance background AI cursor utility for Windows (Magic Pointer Clone)"
+
+[[bin]]
+name = "magic-cursor"
+path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -30,4 +34,13 @@ windows = { version = "0.59", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_Graphics_Dwm",
+    "Win32_System_ProcessStatus",
 ] }
+
