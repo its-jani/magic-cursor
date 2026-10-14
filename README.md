@@ -12,6 +12,89 @@
 
 ---
 
+## 📦 Installation & Setup
+
+### Option 1: Quickstart via npx (Recommended for Users)
+You can run the interactive setup wizard and control the background daemon directly without manual cloning:
+
+```bash
+# Run the interactive setup wizard globally via npx
+npx @its-jani/magic-cursor setup
+
+# Start the background daemon
+npx @its-jani/magic-cursor start
+
+# Check operational status
+npx @its-jani/magic-cursor status
+```
+
+Additional daemon management commands:
+```bash
+# Stop daemon
+npx @its-jani/magic-cursor stop
+
+# Open configuration in editor
+npx @its-jani/magic-cursor config
+```
+
+### Option 2: Global NPM Installation
+Install globally using npm to use the `magic-cursor` command anywhere:
+
+```bash
+npm install -g @its-jani/magic-cursor
+magic-cursor setup
+```
+
+Once installed globally, you can run:
+```bash
+# Start background daemon
+magic-cursor start
+
+# Check status
+magic-cursor status
+
+# Stop daemon
+magic-cursor stop
+
+# Open configuration in editor
+magic-cursor config
+```
+
+### Option 3: Local Development & Global Linking (`npm link`)
+For local testing and iterative development on this machine:
+
+```bash
+# 1. Compile the optimized release binary
+cargo build --release
+
+# 2. Register magic-cursor globally in npm
+npm link
+
+# 3. Test the global CLI command immediately
+magic-cursor status
+magic-cursor setup
+magic-cursor start
+```
+
+### Option 4: Direct Build from Source with Cargo
+
+Ensure you have Rust and Cargo installed:
+
+```bash
+git clone https://github.com/its-jani/magic-cursor.git
+cd magic-cursor
+cargo build --release
+```
+
+The optimized binary will be created at:
+```text
+target/release/magic-cursor.exe
+```
+
+Double-click `magic-cursor.exe` or add it to Windows Startup (`shell:startup`).
+
+---
+
 ## ⚡ Overview & Mission
 
 `magic-cursor` is a native Windows replication of Google's official Magic Pointer. It provides instant visual screen awareness, deep UI element detection, multi-item visual and text cropping, and an on-demand generative AI notetaker directly beneath your cursor.
@@ -93,89 +176,6 @@ To guarantee zero system drag, the entire engine is written in **Rust** using lo
   * **OpenAI / vLLM**: `gpt-4o`, `gpt-4o-mini`
   * **Local Ollama**: `qwen2.5-vl`, `llava`
 * **Draft Auto-Saving**: Closing or pressing `Esc` preserves the active selection tray and typed prompt. Re-opening instantly displays the **"↩ Resume Draft"** quick chip.
-
----
-
-## 📦 Installation & Setup
-
-### Option 1: Quickstart via npx (Recommended for Users)
-You can run the interactive setup wizard and control the background daemon directly without manual cloning:
-
-```bash
-# Run the interactive setup wizard globally via npx
-npx @its-jani/magic-cursor setup
-
-# Start the background daemon
-npx @its-jani/magic-cursor start
-
-# Check operational status
-npx @its-jani/magic-cursor status
-```
-
-Additional daemon management commands:
-```bash
-# Stop daemon
-npx @its-jani/magic-cursor stop
-
-# Open configuration in editor
-npx @its-jani/magic-cursor config
-```
-
-### Option 2: Global NPM Installation
-Install globally using npm to use the `magic-cursor` command anywhere:
-
-```bash
-npm install -g @its-jani/magic-cursor
-magic-cursor setup
-```
-
-Once installed globally, you can run:
-```bash
-# Start background daemon
-magic-cursor start
-
-# Check status
-magic-cursor status
-
-# Stop daemon
-magic-cursor stop
-
-# Open configuration in editor
-magic-cursor config
-```
-
-### Option 3: Local Development & Global Linking (`npm link`)
-For local testing and iterative development on this machine:
-
-```bash
-# 1. Compile the optimized release binary
-cargo build --release
-
-# 2. Register magic-cursor globally in npm
-npm link
-
-# 3. Test the global CLI command immediately
-magic-cursor status
-magic-cursor setup
-magic-cursor start
-```
-
-### Option 4: Direct Build from Source with Cargo
-
-Ensure you have Rust and Cargo installed:
-
-```bash
-git clone https://github.com/its-jani/magic-cursor.git
-cd magic-cursor
-cargo build --release
-```
-
-The optimized binary will be created at:
-```text
-target/release/magic-cursor.exe
-```
-
-Double-click `magic-cursor.exe` or add it to Windows Startup (`shell:startup`).
 
 ---
 
