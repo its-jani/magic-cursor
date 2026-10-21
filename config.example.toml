@@ -1,0 +1,48 @@
+# magic-cursor example configuration
+# Copy this file to %APPDATA%\MagicCursor\config.toml and adjust to taste.
+
+[general]
+# Trigger mode: "both", "hotkey", or "wiggle"
+activation_mode = "both"
+
+# Primary shortcut: "Win+Shift+G", "Ctrl+Alt+G", or "Alt+G"
+hotkey = "Win+Shift+G"
+
+# Mouse wiggle sensitivity (1 = strict, 10 = sensitive)
+wiggle_sensitivity = 5
+wiggle_window_ms = 300
+wiggle_cooldown_ms = 1200
+
+[api]
+# Provider: "gemini", "openai", "anthropic", or "ollama"
+provider = "gemini"
+
+# API Key
+api_key = "YOUR_API_KEY_HERE"
+
+# API Endpoint (defaults to Google Gemini v1beta)
+endpoint = "https://generativelanguage.googleapis.com/v1beta"
+
+# Model identifier
+model = "gemini-2.0-flash"
+
+# System Prompt
+system_prompt = "You are MagicCursor, a high-speed desktop AI assistant operating under the user's cursor. Provide concise, clear, and actionable responses."
+
+temperature = 0.7
+max_tokens = 2048
+
+[rea]
+# Enable REA (Reverse Engineer Anything) MCP structural enrichment
+enabled = true
+mcp_command = "npx -y rea-agents"
+auto_enrich = true
+
+[overlay]
+width = 560.0
+height = 460.0
+crop_width = 600
+crop_height = 400
+auto_capture_screen = true
+acrylic_blur = true
+dark_mode = true

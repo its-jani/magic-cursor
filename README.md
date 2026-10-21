@@ -14,7 +14,7 @@
 
 ## 📦 Installation & Setup
 
-### Option 1: Quickstart via npx (Recommended for Users)
+### Option A: Quickstart via npx (Recommended for Developers)
 You can run the interactive setup wizard and control the background daemon directly without manual cloning:
 
 ```bash
@@ -37,7 +37,21 @@ npx @its-jani/magic-cursor stop
 npx @its-jani/magic-cursor config
 ```
 
-### Option 2: Global NPM Installation
+### Option B: Direct Executable (No Node.js Required)
+Download `magic-cursor.exe` directly from [GitHub Releases](https://github.com/its-jani/magic-cursor/releases).
+
+Each release ships two standalone Windows x64 assets:
+
+| Asset | Description |
+| :--- | :--- |
+| **`magic-cursor-vX.Y.Z-x64-windows.zip`** | Portable package with `magic-cursor.exe` + `config.example.toml` |
+| **`magic-cursor.exe`** | Single standalone binary |
+
+Unzip the package, optionally copy `config.example.toml` to `%APPDATA%\MagicCursor\config.toml`, then double-click `magic-cursor.exe` or add it to Windows Startup (`shell:startup`).
+
+### More Installation Methods
+
+#### Global NPM Installation
 Install globally using npm to use the `magic-cursor` command anywhere:
 
 ```bash
@@ -60,7 +74,7 @@ magic-cursor stop
 magic-cursor config
 ```
 
-### Option 3: Local Development & Global Linking (`npm link`)
+#### Local Development & Global Linking (`npm link`)
 For local testing and iterative development on this machine:
 
 ```bash
@@ -76,7 +90,7 @@ magic-cursor setup
 magic-cursor start
 ```
 
-### Option 4: Direct Build from Source with Cargo
+#### Direct Build from Source with Cargo
 
 Ensure you have Rust and Cargo installed:
 
@@ -242,7 +256,11 @@ dark_mode = true
 
 ```text
 magic-cursor/
+├── .github/
+│   └── workflows/
+│       └── release.yml            # Auto-build & publish .exe/.zip on v* tags
 ├── Cargo.toml                   # Rust workspace & Windows API dependencies
+├── config.example.toml          # Example configuration shipped in releases
 ├── src/                         # Rust Core Application
 │   ├── main.rs                  # Entry point, Win32 event loop & tray management
 │   ├── hooks/

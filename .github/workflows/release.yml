@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Stage portable distribution
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $zipName = "magic-cursor-$version-x64-windows"
+          New-Item -ItemType Directory -Force -Path "dist\$zipName" | Out-Null
+          Copy-Item "target\release\magic-cursor.exe" "dist\$zipName\magic-cursor.exe"
+          Copy-Item "config.example.toml" "dist\$zipName\config.example.toml"
+          Compress-Archive -Path "dist\$zipName\*" -DestinationPath "dist\$zipName.zip" -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/magic-cursor-${{ github.ref_name }}-x64-windows.zip
+            target/release/magic-cursor.exe
