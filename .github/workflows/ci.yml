@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned on purpose: a new stable release can add pedantic lints, and the bump
+  # should be a reviewed commit rather than a red build on an unrelated PR.
+  RUST_TOOLCHAIN: 1.99.0
 
 jobs:
   quality:
@@ -19,8 +22,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - name: Cache cargo build artifacts

@@ -1178,8 +1178,8 @@ mod tests {
     fn presets_are_distinct_and_non_empty() {
         assert_eq!(PRESETS.len(), 4);
         for preset in PRESETS {
-            assert!(!preset.label.is_empty());
-            assert!(!preset.prompt.is_empty());
+            assert_ne!(preset.label, "");
+            assert_ne!(preset.prompt, "");
         }
     }
 

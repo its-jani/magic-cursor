@@ -147,7 +147,7 @@ mod tests {
     fn decodes_a_payload_split_across_chunks() {
         let mut decoder = SseDecoder::new();
 
-        assert!(decoder.push(b"data: {\"a\":1}").is_empty());
+        assert_eq!(decoder.push(b"data: {\"a\":1}"), Vec::<String>::new());
         assert_eq!(decoder.push(b"\n"), vec![r#"{"a":1}"#.to_string()]);
     }
 
@@ -159,7 +159,7 @@ mod tests {
         // Split the frame in the middle of the four-byte character.
         let mut head = b"data: ".to_vec();
         head.extend_from_slice(&payload[..2]);
-        assert!(decoder.push(&head).is_empty());
+        assert_eq!(decoder.push(&head), Vec::<String>::new());
 
         let mut tail = payload[2..].to_vec();
         tail.push(b'\n');
@@ -170,7 +170,10 @@ mod tests {
     fn ignores_comments_events_and_blank_lines() {
         let mut decoder = SseDecoder::new();
 
-        assert!(decoder.push(b": keep-alive\n\nevent: ping\n").is_empty());
+        assert_eq!(
+            decoder.push(b": keep-alive\n\nevent: ping\n"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -356,8 +356,11 @@ magic-cursor/
 
 ## 🧰 Working on the Code
 
-The project builds with Rust 1.81 or newer. The three commands below are the same
-ones CI runs, so a green local run means a green pipeline:
+The crate declares `rust-version = "1.81"`, and CI runs a pinned stable toolchain
+(`RUST_TOOLCHAIN` in the workflow) so an upstream release that adds a pedantic lint
+arrives as a reviewed bump instead of a red build on an unrelated pull request. The
+three commands below are the same ones CI runs, so a green local run means a green
+pipeline:
 
 ```bash
 # 1. Formatting
