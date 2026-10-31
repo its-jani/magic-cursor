@@ -45,7 +45,10 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          # Publish immediately: the tag push is the release event, and the
+          # newest tag becomes the "Latest" badge on the repository sidebar.
+          draft: false
+          make_latest: true
           generate_release_notes: true
           files: |
             dist/magic-cursor-${{ github.ref_name }}-x64-windows.zip
