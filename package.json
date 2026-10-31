@@ -1,6 +1,6 @@
 {
   "name": "@its-jani/magic-cursor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Ultra-lightweight Windows Magic Pointer clone in Rust",
   "main": "bin/cli.js",
   "bin": {

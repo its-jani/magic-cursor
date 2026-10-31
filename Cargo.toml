@@ -1,9 +1,15 @@
 [package]
 name = "magic-cursor"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
+rust-version = "1.81"
 authors = ["MagicCursor Team"]
 description = "Hyper-lightweight, high-performance background AI cursor utility for Windows (Magic Pointer Clone)"
+license = "MIT"
+repository = "https://github.com/its-jani/magic-cursor"
+readme = "README.md"
+keywords = ["windows", "ai", "screen-capture", "accessibility"]
+categories = ["gui"]
 
 [[bin]]
 name = "magic-cursor"
@@ -43,4 +49,65 @@ windows = { version = "0.59", features = [
     "Win32_Graphics_Dwm",
     "Win32_System_ProcessStatus",
 ] }
+
+# Lints follow the BeautifulRust rust-best-practices skill: everything is shown as a
+# warning locally and turned into an error in CI with `cargo clippy -- -D warnings`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Every intentional panic needs a reason; `expect` is the sanctioned form.
+unwrap_used = "warn"
+expect_used = "allow"
+panic_in_result_fn = "warn"
+missing_assert_message = "warn"
+
+# Unsafe must be justified. Each block carries a `// SAFETY:` comment, and a block
+# is limited to one logical operation. Win32 menu, COM and GDI sequences are one
+# operation spread over several calls, so the per-call variant of the lint is
+# allowed rather than scattering one comment over a dozen single-call blocks.
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "allow"
+
+# API shape and evolution.
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+
+# Idioms and leftovers.
+string_add = "warn"
+wildcard_imports = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+# This crate is a binary, so library-facing doc requirements do not apply.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Win32, egui, and pixel code is typed in i32/u32/f32 and converts constantly;
+# the numeric lints would only add noise to every FFI call site.
+as_conversions = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+
+# Style preferences the skill explicitly disagrees with.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+enum_glob_use = "allow"
+
+[profile.release]
+# Size and speed at once: the capture loop is latency-sensitive, so keep full
+# optimisation and pay for it with LTO instead of a smaller opt-level.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
 

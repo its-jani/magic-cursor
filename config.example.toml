@@ -15,6 +15,7 @@ wiggle_cooldown_ms = 1200
 
 [api]
 # Provider: "gemini", "openai", "anthropic", or "ollama"
+# Accepted aliases: "google" = gemini, "claude" = anthropic, "vllm" = ollama
 provider = "gemini"
 
 # API Key
