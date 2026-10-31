@@ -1,3 +1,11 @@
+//! `MagicCursor`: a screen-aware AI overlay that lives under the cursor.
+//!
+//! The process runs two threads. The main thread owns the Win32 message pump,
+//! the tray icon, and the global hotkeys, which keeps idle CPU at zero because
+//! `GetMessageW` blocks. A worker thread receives trigger events, captures the
+//! desktop, extracts UI Automation hotspots, and runs the overlay on the main
+//! thread once a frame is ready.
+
 #![windows_subsystem = "windows"]
 
 pub mod ai;
@@ -8,15 +16,16 @@ pub mod hooks;
 pub mod tray;
 pub mod ui;
 
+use std::path::Path;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
+
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    PostQuitMessage, RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE,
-    WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_QUIT, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostQuitMessage,
+    RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
 use ai::AiClient;
@@ -25,143 +34,175 @@ use capture::capture_full_screen;
 use config::Config;
 use hooks::mouse_keyboard::{
     get_current_cursor_pos, HotkeyDefinition, HotkeyManager, TriggerEvent, TriggerSource,
-    WiggleDetectorHandle,
 };
+use hooks::WiggleDetectorHandle;
 use tray::{
     TrayIcon, ID_TRAY_EXIT, ID_TRAY_OPEN_CONFIG, ID_TRAY_OPEN_FOLDER, ID_TRAY_TOGGLE_PAUSE,
     ID_TRAY_TRIGGER, WM_TRAY_CALLBACK,
 };
-use ui::show_magic_overlay;
+use ui::{show_magic_overlay, OverlayRequest};
 
+/// Hotkey id of the user-configured shortcut.
 const PRIMARY_HOTKEY_ID: i32 = 101;
+/// Hotkey id of the `Ctrl+Alt+G` fallback.
 const FALLBACK_HOTKEY_ID: i32 = 102;
 
-static GLOBAL_TX: Mutex<Option<Sender<TriggerEvent>>> = Mutex::new(None);
+/// Thread name of the worker that captures and shows the overlay.
+const WORKER_THREAD_NAME: &str = "magic-cursor-overlay-worker";
 
+/// Sink for trigger events; `None` until `main` installs the channel.
+static TRIGGER_SENDER: Mutex<Option<Sender<TriggerEvent>>> = Mutex::new(None);
+
+/// Window procedure of the message-only window that receives hotkey and tray events.
+///
+/// SAFETY: the system calls this with messages and parameters that match
+/// `WNDCLASSW` registration; anything unrecognised is forwarded to
+/// `DefWindowProcW`, which is what makes the parameter interpretation sound.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
-    msg: u32,
+    message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    match msg {
+    match message {
         WM_HOTKEY => {
             let id = wparam.0 as i32;
-            if (id == PRIMARY_HOTKEY_ID || id == FALLBACK_HOTKEY_ID) && !TrayIcon::is_paused() {
-                let (x, y) = get_current_cursor_pos();
-                if let Ok(guard) = GLOBAL_TX.lock() {
-                    if let Some(ref tx) = *guard {
-                        let _ = tx.send(TriggerEvent {
-                            source: TriggerSource::Hotkey,
-                            cursor_x: x,
-                            cursor_y: y,
-                        });
-                    }
-                }
+            let is_trigger_hotkey = id == PRIMARY_HOTKEY_ID || id == FALLBACK_HOTKEY_ID;
+
+            if is_trigger_hotkey && TrayIcon::pause_state().is_running() {
+                send_trigger(TriggerSource::Hotkey);
             }
+
             LRESULT(0)
         }
         WM_TRAY_CALLBACK => {
             let event = lparam.0 as u32;
+
             if event == WM_RBUTTONUP {
                 TrayIcon::show_context_menu(hwnd);
-            } else if event == WM_LBUTTONUP && !TrayIcon::is_paused() {
-                let (x, y) = get_current_cursor_pos();
-                if let Ok(guard) = GLOBAL_TX.lock() {
-                    if let Some(ref tx) = *guard {
-                        let _ = tx.send(TriggerEvent {
-                            source: TriggerSource::Tray,
-                            cursor_x: x,
-                            cursor_y: y,
-                        });
-                    }
-                }
+            } else if event == WM_LBUTTONUP && TrayIcon::pause_state().is_running() {
+                send_trigger(TriggerSource::Tray);
             }
+
             LRESULT(0)
         }
         WM_COMMAND => {
-            let cmd = wparam.0 as usize;
-            match cmd {
-                ID_TRAY_TRIGGER => {
-                    let (x, y) = get_current_cursor_pos();
-                    if let Ok(guard) = GLOBAL_TX.lock() {
-                        if let Some(ref tx) = *guard {
-                            let _ = tx.send(TriggerEvent {
-                                source: TriggerSource::Tray,
-                                cursor_x: x,
-                                cursor_y: y,
-                            });
-                        }
-                    }
-                }
-                ID_TRAY_TOGGLE_PAUSE => {
-                    let current = TrayIcon::is_paused();
-                    TrayIcon::set_paused(!current);
-                    WiggleDetectorHandle::set_enabled(current);
-                }
-                ID_TRAY_OPEN_CONFIG => {
-                    let path = Config::config_path();
-                    let _ = open_file_in_explorer(&path);
-                }
-                ID_TRAY_OPEN_FOLDER => {
-                    let dir = Config::config_dir();
-                    let _ = open_file_in_explorer(&dir);
-                }
-                ID_TRAY_EXIT => {
-                    let _ = DestroyWindow(hwnd);
-                    PostQuitMessage(0);
-                }
-                _ => {}
-            }
+            handle_menu_command(wparam.0, hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            // SAFETY: posts the quit message for this thread's message loop.
+            unsafe {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        _ => {
+            // SAFETY: unhandled messages are forwarded to the default procedure,
+            // which is the documented contract for `WNDCLASSW::lpfnWndProc`.
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
     }
 }
 
-fn open_file_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::process::Command;
-        Command::new("explorer").arg(path).spawn()?;
+/// Dispatches a tray menu command.
+fn handle_menu_command(command: usize, hwnd: HWND) {
+    match command {
+        ID_TRAY_TRIGGER => send_trigger(TriggerSource::Tray),
+        ID_TRAY_TOGGLE_PAUSE => toggle_pause(),
+        ID_TRAY_OPEN_CONFIG => open_in_explorer(&Config::config_path()),
+        ID_TRAY_OPEN_FOLDER => open_in_explorer(&Config::config_dir()),
+        ID_TRAY_EXIT => exit(hwnd),
+        _ => {}
     }
-    Ok(())
 }
 
-fn main() {
-    // 1. Initialize background Tokio runtime for async LLM and network streaming
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("Failed to create Tokio runtime");
+/// Flips the pause state for both the tray and the wiggle detector.
+fn toggle_pause() {
+    let next = TrayIcon::pause_state().toggled();
+    TrayIcon::set_pause_state(next);
+    WiggleDetectorHandle::set_enabled(next.is_running());
+}
 
-    let _rt_guard = rt.enter();
-
-    // 2. Load or create user configuration (%APPDATA%\MagicCursor\config.toml)
-    let (config, _config_path) = Config::load_or_create();
-    let config_arc = Arc::new(config);
-
-    // 3. Setup trigger event channel
-    let (trigger_tx, trigger_rx) = channel::<TriggerEvent>();
-    if let Ok(mut guard) = GLOBAL_TX.lock() {
-        *guard = Some(trigger_tx.clone());
+/// Destroys the message window, which ends the message loop.
+fn exit(hwnd: HWND) {
+    // SAFETY: `hwnd` is the window this procedure belongs to, and the quit
+    // message terminates the loop that owns it.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+        PostQuitMessage(0);
     }
+}
 
-    // 4. Create Win32 message-only window
+/// Sends a trigger event to the worker thread, if it is still listening.
+fn send_trigger(source: TriggerSource) {
+    let (cursor_x, cursor_y) = get_current_cursor_pos();
+
+    let sender = TRIGGER_SENDER.lock().expect("trigger sender lock poisoned");
+    if let Some(tx) = sender.as_ref() {
+        let _ = tx.send(TriggerEvent {
+            source,
+            cursor_x,
+            cursor_y,
+        });
+    }
+}
+
+/// Opens a path in File Explorer.
+fn open_in_explorer(path: &Path) {
+    if let Err(err) = std::process::Command::new("explorer").arg(path).spawn() {
+        eprintln!("[magic-cursor] could not open {}: {err}", path.display());
+    }
+}
+
+/// Runs the overlay once per trigger event on a dedicated worker thread.
+fn spawn_overlay_worker(config: Arc<Config>, receiver: std::sync::mpsc::Receiver<TriggerEvent>) {
+    let spawned = std::thread::Builder::new()
+        .name(WORKER_THREAD_NAME.to_string())
+        .spawn(move || {
+            let ai_client = AiClient::new();
+            let extractor = UIAutomationExtractor::new();
+
+            while let Ok(event) = receiver.recv() {
+                if !TrayIcon::pause_state().is_running() {
+                    continue;
+                }
+
+                // Capture first: the frame has to match the screen the user saw
+                // when the trigger fired.
+                let frame = capture_full_screen();
+                let hotspots =
+                    extractor.extract_hotspots_near_cursor(event.cursor_x, event.cursor_y);
+
+                show_magic_overlay(OverlayRequest {
+                    config: (*config).clone(),
+                    frame,
+                    hotspots,
+                    cursor: (event.cursor_x, event.cursor_y),
+                    ai_client: ai_client.clone(),
+                });
+            }
+        });
+
+    if let Err(err) = spawned {
+        eprintln!("[magic-cursor] could not spawn the overlay worker: {err}");
+    }
+}
+
+/// Creates the hidden message window that receives hotkey and tray callbacks.
+fn create_message_window() -> windows::core::Result<HWND> {
     let class_name = w!("MagicCursorMsgWindowClass");
-    let hwnd = unsafe {
-        let wnd_class = WNDCLASSW {
+
+    // SAFETY: the class is registered before the window is created, and both use
+    // the same static class name pointer for the lifetime of the process.
+    unsafe {
+        let window_class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: HINSTANCE(std::ptr::null_mut()),
             lpszClassName: class_name,
-            ..Default::default()
+            ..WNDCLASSW::default()
         };
-        RegisterClassW(&wnd_class);
+        RegisterClassW(&window_class);
 
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -177,84 +218,74 @@ fn main() {
             None,
             None,
         )
-        .expect("Failed to create background message window")
-    };
+    }
+}
 
-    // 5. Create System Tray Icon
+fn main() {
+    // 1. Background Tokio runtime for the streaming LLM calls.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("Tokio runtime must start before any AI request is made");
+    let _runtime_guard = runtime.enter();
+
+    // 2. User configuration, created on first run.
+    let (config, config_path) = Config::load_or_create();
+    let config = Arc::new(config);
+
+    // 3. Trigger channel shared with the window procedure.
+    let (trigger_tx, trigger_rx) = channel::<TriggerEvent>();
+    *TRIGGER_SENDER.lock().expect("trigger sender lock poisoned") = Some(trigger_tx.clone());
+
+    // 4. Hidden message window.
+    let hwnd = create_message_window().expect("message window must be created");
+    eprintln!(
+        "[magic-cursor] loaded configuration from {}",
+        config_path.display()
+    );
+
+    // 5. Tray icon, kept alive for the lifetime of the message loop.
     let _tray = TrayIcon::new(hwnd, "Magic Cursor (Win+Shift+G / Wiggle)");
 
-    // 6. Register Global Hotkeys
-    let mode = config_arc.general.activation_mode.to_lowercase();
-    let hotkey_enabled = mode == "hotkey" || mode == "both";
-    let wiggle_enabled = mode == "wiggle" || mode == "both";
-
-    let mut hotkey_mgr = HotkeyManager::new(hwnd);
-    if hotkey_enabled {
-        // Register configured or default hotkey (Win+Shift+G)
-        let primary_def = HotkeyDefinition::parse(&config_arc.general.hotkey)
+    // 6. Global hotkeys.
+    let mut hotkeys = HotkeyManager::new(hwnd);
+    if config.general.activation_mode.uses_hotkey() {
+        let primary = HotkeyDefinition::parse(&config.general.hotkey)
             .unwrap_or_else(HotkeyDefinition::default_magic);
-        let _ = hotkey_mgr.register(PRIMARY_HOTKEY_ID, &primary_def);
+        if !hotkeys.register(PRIMARY_HOTKEY_ID, &primary) {
+            eprintln!(
+                "[magic-cursor] {} is already owned by another application",
+                primary.display
+            );
+        }
 
-        // Also register fallback shortcut (Ctrl+Alt+G)
-        let fallback_def = HotkeyDefinition::fallback_magic();
-        let _ = hotkey_mgr.register(FALLBACK_HOTKEY_ID, &fallback_def);
+        let fallback = HotkeyDefinition::fallback_magic();
+        let _ = hotkeys.register(FALLBACK_HOTKEY_ID, &fallback);
     }
 
-    // 7. Start Mouse Wiggle Detector if configured
-    let _wiggle_handle = if wiggle_enabled {
+    // 7. Cursor wiggle detector.
+    let _wiggle = if config.general.activation_mode.uses_wiggle() {
         WiggleDetectorHandle::start(
-            config_arc.general.wiggle_sensitivity,
-            config_arc.general.wiggle_window_ms,
-            config_arc.general.wiggle_cooldown_ms,
-            trigger_tx.clone(),
+            config.general.wiggle_sensitivity,
+            config.general.wiggle_window_ms,
+            config.general.wiggle_cooldown_ms,
+            trigger_tx,
         )
     } else {
         None
     };
 
-    // 8. Spawn background worker to handle triggers, capture screen, and display overlay
-    let worker_config = Arc::clone(&config_arc);
-    std::thread::Builder::new()
-        .name("magic-cursor-overlay-worker".into())
-        .spawn(move || {
-            let ai_client = AiClient::new();
-            let uia_extractor = UIAutomationExtractor::new();
+    // 8. Overlay worker.
+    spawn_overlay_worker(Arc::clone(&config), trigger_rx);
 
-            while let Ok(event) = trigger_rx.recv() {
-                if TrayIcon::is_paused() {
-                    continue;
-                }
-
-                // A. Instant sub-10ms DXGI Desktop Duplication frame grab
-                let captured_frame = capture_full_screen();
-
-                // B. Query Windows UI Automation elements near cursor
-                let hotspots = uia_extractor.extract_hotspots_near_cursor(
-                    event.cursor_x,
-                    event.cursor_y,
-                );
-
-                // C. Launch interactive Magic Pointer overlay
-                show_magic_overlay(
-                    (*worker_config).clone(),
-                    captured_frame,
-                    hotspots,
-                    (event.cursor_x, event.cursor_y),
-                    ai_client.clone(),
-                );
-            }
-        })
-        .expect("Failed to spawn overlay worker");
-
-    // 9. Standard Windows Message Loop (Puts main thread to 0.0% CPU sleep while idle)
+    // 9. Message loop: blocks while idle, so the process costs no CPU.
+    let mut message = MSG::default();
+    // SAFETY: standard Win32 pump; `message` is a stack local owned by this frame.
     unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if msg.message == WM_QUIT {
-                break;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
     }
 }

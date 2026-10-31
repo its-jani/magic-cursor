@@ -1,5 +1,8 @@
+//! UI Automation element extraction and framework detection.
+
 pub mod accessibility;
 
 pub use accessibility::{
-    get_process_info_for_hwnd, DetectedHotspot, ReaContextEnricher, UIAutomationExtractor,
+    control_type_name, inspect_application, process_info_for_window, DetectedHotspot, ProcessInfo,
+    UIAutomationExtractor,
 };

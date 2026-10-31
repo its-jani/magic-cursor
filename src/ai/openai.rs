@@ -1,154 +1,191 @@
-use futures_util::StreamExt;
+//! OpenAI-compatible chat completions, which also covers Ollama, vLLM,
+//! `OpenRouter`, Groq, and `DeepSeek`.
+
 use reqwest::Client;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
 use super::client::{MultiSelectionContext, SelectedClip, StreamChunk};
+use super::error::StreamError;
+use super::sse::{self, SsePayload};
 use crate::config::ApiConfig;
 
+/// Model used when none is configured.
+const DEFAULT_MODEL: &str = "gpt-4o";
+
+/// System prompt used when the configuration leaves it empty.
+const DEFAULT_SYSTEM_PROMPT: &str = "You are MagicCursor, a high-speed desktop AI assistant \
+     operating under the user's cursor. Provide concise, clear, and actionable responses.";
+
+/// Prompt used when the user sends clips without typing a question.
+const EMPTY_PROMPT: &str = "Analyze the selected items and provide a clear, concise summary.";
+
+/// The sentinel payload that ends an `OpenAI` stream.
+const DONE_SENTINEL: &str = "[DONE]";
+
+/// Streams an OpenAI-compatible completion for `prompt` plus the selected clips.
+///
+/// Errors are returned for the caller to forward; text fragments are pushed to
+/// `tx` as they arrive.
 pub async fn stream_openai(
     client: &Client,
     config: &ApiConfig,
     prompt: &str,
     context: &MultiSelectionContext,
-    tx: Sender<StreamChunk>,
-) -> Result<(), String> {
-    let mut messages = Vec::new();
+    tx: &Sender<StreamChunk>,
+) -> Result<(), StreamError> {
+    let payload = build_payload(config, prompt, context);
 
-    // System prompt
+    let mut request = client.post(&config.endpoint).json(&payload);
+    if !config.api_key.trim().is_empty() {
+        request = request.bearer_auth(&config.api_key);
+    }
+
+    let response = request.send().await?;
+    let response = sse::ensure_success(response, "OpenAI").await?;
+
+    sse::pump(response, tx, parse_chunk).await
+}
+
+/// Assembles the `messages` body for one request.
+fn build_payload(config: &ApiConfig, prompt: &str, context: &MultiSelectionContext) -> Value {
     let system_text = if config.system_prompt.is_empty() {
-        "You are MagicCursor, a high-speed desktop AI assistant operating under the user's cursor. Provide concise, clear, and actionable responses."
+        DEFAULT_SYSTEM_PROMPT
     } else {
         &config.system_prompt
     };
 
-    messages.push(json!({
-        "role": "system",
-        "content": system_text
-    }));
-
-    // Build user content parts
     let mut user_parts = Vec::new();
 
-    if let Some(ref meta) = context.app_context {
+    if let Some(meta) = &context.app_context {
         user_parts.push(json!({
             "type": "text",
-            "text": format!("Target Application / Screen Context: {}", meta)
+            "text": format!("Target Application / Screen Context: {meta}")
         }));
     }
 
-    for (idx, clip) in context.items.iter().enumerate() {
+    for (index, clip) in context.items.iter().enumerate() {
+        let number = index + 1;
         match clip {
-            SelectedClip::Text { title, content } => {
-                user_parts.push(json!({
-                    "type": "text",
-                    "text": format!("--- Clip #{} [{}] ---\n{}\n--------------------------", idx + 1, title, content)
-                }));
-            }
+            SelectedClip::Text { title, content } => user_parts.push(json!({
+                "type": "text",
+                "text": format!("--- Clip #{number} [{title}] ---\n{content}\n--------------------------")
+            })),
             SelectedClip::Image {
                 title, base64_png, ..
             } => {
-                let data_url = format!("data:image/png;base64,{}", base64_png);
                 user_parts.push(json!({
                     "type": "text",
-                    "text": format!("[Image Clip #{}: {}]", idx + 1, title)
+                    "text": format!("[Image Clip #{number}: {title}]")
                 }));
                 user_parts.push(json!({
                     "type": "image_url",
-                    "image_url": {
-                        "url": data_url
-                    }
+                    "image_url": { "url": format!("data:image/png;base64,{base64_png}") }
                 }));
             }
         }
     }
 
     let final_prompt = if prompt.trim().is_empty() {
-        "Analyze the selected items and provide a clear, concise summary."
+        EMPTY_PROMPT
     } else {
         prompt
     };
+    user_parts.push(json!({ "type": "text", "text": final_prompt }));
 
-    user_parts.push(json!({
-        "type": "text",
-        "text": final_prompt
-    }));
-
-    messages.push(json!({
-        "role": "user",
-        "content": user_parts
-    }));
-
-    let model = if config.model.is_empty() {
-        "gpt-4o"
-    } else {
-        &config.model
-    };
-
-    let payload = json!({
-        "model": model,
-        "messages": messages,
+    json!({
+        "model": model_name(&config.model),
+        "messages": [
+            { "role": "system", "content": system_text },
+            { "role": "user", "content": user_parts }
+        ],
         "stream": true,
         "temperature": config.temperature,
         "max_tokens": config.max_tokens
-    });
+    })
+}
 
-    let mut req = client.post(&config.endpoint).json(&payload);
-    if !config.api_key.trim().is_empty() {
-        req = req.bearer_auth(&config.api_key);
+/// Returns the configured model, or the `OpenAI` default.
+fn model_name(model: &str) -> &str {
+    if model.is_empty() {
+        DEFAULT_MODEL
+    } else {
+        model
+    }
+}
+
+/// Extracts the assistant delta from one `OpenAI` chunk.
+fn parse_chunk(data: &str) -> SsePayload {
+    if data == DONE_SENTINEL {
+        return SsePayload::Done;
     }
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| format!("Network request failed: {}", e))?;
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return SsePayload::Ignore;
+    };
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let err_text = response.text().await.unwrap_or_default();
-        return Err(format!("API Error ({}): {}", status, err_text));
+    let text = value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if text.is_empty() {
+        SsePayload::Ignore
+    } else {
+        SsePayload::Text(text.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_sentinel_ends_the_stream() {
+        assert!(matches!(parse_chunk(DONE_SENTINEL), SsePayload::Done));
     }
 
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    #[test]
+    fn ignores_role_only_deltas() {
+        let payload = r#"{"choices":[{"delta":{"role":"assistant"}}]}"#;
 
-    while let Some(item) = stream.next().await {
-        let bytes = item.map_err(|e| format!("Stream error: {}", e))?;
-        let text = String::from_utf8_lossy(&bytes);
-        buffer.push_str(&text);
+        assert!(matches!(parse_chunk(payload), SsePayload::Ignore));
+    }
 
-        while let Some(line_end) = buffer.find('\n') {
-            let line = buffer[..line_end].trim().to_string();
-            buffer = buffer[line_end + 1..].to_string();
+    #[test]
+    fn extracts_content_deltas() {
+        let payload = r#"{"choices":[{"delta":{"content":"hi"}}]}"#;
 
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-
-            if line.starts_with("data: ") {
-                let data = &line[6..];
-                if data == "[DONE]" {
-                    let _ = tx.send(StreamChunk::Done).await;
-                    return Ok(());
-                }
-
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
-                        if let Some(first) = choices.first() {
-                            if let Some(delta) = first.get("delta") {
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                    if !content.is_empty() {
-                                        let _ = tx.send(StreamChunk::Token(content.to_string())).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        match parse_chunk(payload) {
+            SsePayload::Text(text) => assert_eq!(text, "hi"),
+            _ => panic!("expected text"),
         }
     }
 
-    let _ = tx.send(StreamChunk::Done).await;
-    Ok(())
+    #[test]
+    fn empty_model_falls_back_to_default() {
+        assert_eq!(model_name(""), DEFAULT_MODEL);
+        assert_eq!(model_name("qwen2.5-vl"), "qwen2.5-vl");
+    }
+
+    #[test]
+    fn images_use_a_data_url() {
+        let config = ApiConfig::default();
+        let context = MultiSelectionContext {
+            items: vec![SelectedClip::Image {
+                title: "Crop".to_string(),
+                width: 4,
+                height: 4,
+                base64_png: "AAAA".to_string(),
+            }],
+            app_context: None,
+        };
+
+        let rendered = build_payload(&config, "", &context).to_string();
+
+        assert!(rendered.contains("data:image/png;base64,AAAA"));
+    }
 }
