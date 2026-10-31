@@ -4,6 +4,7 @@
 > Screen awareness, interactive hotspots, multi-select tray, and generative AI notetaking with **< 15MB RAM idle**, **< 0.5% CPU overhead**, and **sub-10ms DXGI capture**.
 
 [![npm version](https://img.shields.io/npm/v/@its-jani/magic-cursor.svg)](https://www.npmjs.com/package/@its-jani/magic-cursor)
+[![CI](https://github.com/its-jani/magic-cursor/actions/workflows/ci.yml/badge.svg)](https://github.com/its-jani/magic-cursor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6.svg?style=flat-square&logo=windows)](https://microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Rust-2021%20Edition-black.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -158,6 +159,64 @@ To guarantee zero system drag, the entire engine is written in **Rust** using lo
 
 ---
 
+## 🧪 Engineering Standards (v1.1.0)
+
+Version 1.1.0 is a full pass over the codebase against the
+[BeautifulRust](https://github.com/morganlinton/BeautifulRust) `rust-best-practices`
+skill. The feature set is unchanged; the internals are now idiomatic Rust, and the
+defects that survived in 1.0.0 are gone.
+
+### Gates that run on every push
+
+| Gate | Command | Result |
+| :--- | :--- | :--- |
+| Formatting | `cargo fmt --all -- --check` | clean |
+| Lints | `cargo clippy --all-targets --all-features -- -D warnings` | clean |
+| Tests | `cargo test --all-features` | **53 passing** |
+
+`.github/workflows/ci.yml` runs those three steps on `windows-latest` for every push
+to `main` and every pull request. The lint levels themselves live in `Cargo.toml`
+(`[lints]`), so the editor, `cargo clippy`, and CI all read one source of truth:
+`clippy::pedantic` plus selected `clippy::restriction` lints such as `unwrap_used`
+and `undocumented_unsafe_blocks`. Lints that only fight Win32 types (`as_conversions`
+and friends) are switched off once, in the manifest, with the reason written next to
+them.
+
+### What changed in the code
+
+* **One SSE decoder, three providers.** `ai/sse.rs` owns the wire framing and buffers
+  raw bytes until a newline arrives, so the Gemini, Anthropic, and OpenAI handlers
+  now share a single parser instead of keeping three copies. This also fixes a real
+  bug: the old per-chunk `String::from_utf8_lossy` could split a multi-byte character
+  in half and print replacement glyphs.
+* **Typed errors instead of `String`.** `ai/error.rs` defines `StreamError` and
+  `config.rs` defines `ConfigError`; both implement `std::error::Error`, and the API
+  config's `Debug` prints `api_key = "<redacted>"` so a stray log can never leak a key.
+* **RAII over manual cleanup.** Duplicated DXGI frames, mapped textures, GDI DC/Bitmap
+  pairs, and the tray popup menu are now owned by `Drop` guards, which removes the
+  leak on every early return path.
+* **State is modelled with enums.** `ActivationMode`, `Provider`, `PauseState`,
+  `Direction`, and `SelectedClip` replaced loosely-typed `String`/`bool` fields, so an
+  invalid trigger mode or provider name is rejected at load time rather than silently
+  falling back.
+* **No panics on hostile input.** Crop rectangles are clamped and bounds-checked,
+  tray badges truncate on character boundaries, and the COM teardown only runs when
+  `CoInitializeEx` actually succeeded.
+* **Tests that pin behaviour.** 53 unit tests cover hotkey parsing, wiggle stroke
+  detection, SSE framing (including a multi-byte split), TOML round-tripping, config
+  redaction, and PNG encoding.
+
+### Fixed in 1.1.0
+
+* Overlay panel hit-testing used a hardcoded `540 × 440` rectangle instead of the
+  clamped panel size, so clicks near the real edge were mis-routed.
+* Tray badge titles were sliced by byte index and could panic on CJK or emoji titles.
+* `CoUninitialize` ran even when COM initialisation had failed.
+* A capture frame with an inconsistent buffer length could panic inside `crop`.
+* GDI and DXGI resources leaked when a stage of the capture pipeline failed.
+
+---
+
 ## 🎯 Feature Specifications & Mechanics
 
 ### A. Triggers & Activation Engine
@@ -204,7 +263,7 @@ Example configuration file:
 
 ```toml
 [general]
-# Trigger mode: "both", "hotkey", or "wiggle"
+# Trigger mode: "both", "hotkey", or "wiggle" (anything else is rejected at load)
 activation_mode = "both"
 
 # Primary shortcut: "Win+Shift+G", "Ctrl+Alt+G", or "Alt+G"
@@ -217,6 +276,7 @@ wiggle_cooldown_ms = 1200
 
 [api]
 # Provider: "gemini", "openai", "anthropic", or "ollama"
+# Accepted aliases: "google" = gemini, "claude" = anthropic, "vllm" = ollama
 provider = "gemini"
 
 # API Key
@@ -258,8 +318,9 @@ dark_mode = true
 magic-cursor/
 ├── .github/
 │   └── workflows/
+│       ├── ci.yml                 # fmt + clippy -D warnings + tests on every push
 │       └── release.yml            # Auto-build & publish .exe/.zip on v* tags
-├── Cargo.toml                   # Rust workspace & Windows API dependencies
+├── Cargo.toml                   # Dependencies, MSRV, lint policy, release profile
 ├── config.example.toml          # Example configuration shipped in releases
 ├── src/                         # Rust Core Application
 │   ├── main.rs                  # Entry point, Win32 event loop & tray management
@@ -275,6 +336,8 @@ magic-cursor/
 │   ├── ai/
 │   │   ├── mod.rs               # AI module exports
 │   │   ├── client.rs            # Async multi-provider LLM API client (reqwest)
+│   │   ├── error.rs             # StreamError shared by every provider
+│   │   ├── sse.rs               # Shared SSE framing decoder & stream pump
 │   │   ├── gemini.rs            # Google Gemini SSE streaming handler
 │   │   ├── openai.rs            # OpenAI & Ollama SSE streaming handler
 │   │   └── anthropic.rs         # Anthropic Claude Messages SSE handler
@@ -288,6 +351,28 @@ magic-cursor/
 ├── package.json                 # npm distribution config
 └── README.md                    # Production-grade GitHub README
 ```
+
+---
+
+## 🧰 Working on the Code
+
+The project builds with Rust 1.81 or newer. The three commands below are the same
+ones CI runs, so a green local run means a green pipeline:
+
+```bash
+# 1. Formatting
+cargo fmt --all -- --check
+
+# 2. Lints (level is configured in Cargo.toml, not on the command line)
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 3. Tests
+cargo test --all-features
+```
+
+Release builds use fat LTO with a single codegen unit
+(`[profile.release]` in `Cargo.toml`), which is what produces the ~9 MB standalone
+binary but makes `cargo build --release` noticeably slower than a debug build.
 
 ---
 
