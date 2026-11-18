@@ -13,13 +13,15 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, MOD_WIN, VK_F1, VK_SPACE,
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_CONTROL, VK_F1, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSLLHOOKSTRUCT,
-    WH_MOUSE_LL, WM_MOUSEMOVE, WM_QUIT,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_MOUSEMOVE, WM_QUIT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// Number of mouse samples needed before the detector scores the window.
@@ -47,6 +49,8 @@ pub enum TriggerSource {
     Wiggle,
     /// A click on the tray icon or its menu.
     Tray,
+    /// A request to open the settings window instead of the overlay.
+    Settings,
 }
 
 /// A request to open the overlay at a screen position.
@@ -90,6 +94,20 @@ impl HotkeyDefinition {
     /// The fallback shortcut, `Ctrl+Alt+G`, registered alongside the primary one.
     pub fn fallback_magic() -> Self {
         Self::with(vk_for_char('G'), MOD_CONTROL.0 | MOD_ALT.0, "Ctrl+Alt+G")
+    }
+
+    /// A conflict-free fallback, `Alt+Space`, tried when the `G` shortcuts fail.
+    pub fn alt_space() -> Self {
+        Self::with(u32::from(VK_SPACE.0), MOD_ALT.0, "Alt+Space")
+    }
+
+    /// A conflict-free fallback, `Ctrl+Shift+Space`, tried after `Alt+Space`.
+    pub fn ctrl_shift_space() -> Self {
+        Self::with(
+            u32::from(VK_SPACE.0),
+            MOD_CONTROL.0 | MOD_SHIFT.0,
+            "Ctrl+Shift+Space",
+        )
     }
 
     /// Parses a shortcut such as `Win+Shift+G`, `Ctrl+Alt+F5`, or `Alt+Space`.
@@ -217,6 +235,209 @@ impl Drop for HotkeyManager {
     fn drop(&mut self) {
         self.unregister_all();
     }
+}
+
+/// Returns the `MOD_*` mask of the modifiers currently held down.
+fn current_modifiers() -> u32 {
+    let mut modifiers = 0;
+    // SAFETY: GetAsyncKeyState only reads the asynchronous key-state table.
+    unsafe {
+        if GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0 {
+            modifiers |= MOD_SHIFT.0;
+        }
+        if GetAsyncKeyState(i32::from(VK_CONTROL.0)) < 0 {
+            modifiers |= MOD_CONTROL.0;
+        }
+        if GetAsyncKeyState(i32::from(VK_MENU.0)) < 0 {
+            modifiers |= MOD_ALT.0;
+        }
+        if GetAsyncKeyState(i32::from(VK_LWIN.0)) < 0 || GetAsyncKeyState(i32::from(VK_RWIN.0)) < 0
+        {
+            modifiers |= MOD_WIN.0;
+        }
+    }
+    modifiers
+}
+
+/// Shortcut watched by the low-level keyboard hook, guarded by
+/// [`KEYBOARD_HOOK_STATE`] because the hook callback has no user data pointer.
+#[derive(Debug)]
+struct KeyboardHookState {
+    modifiers: u32,
+    vk: u32,
+    key_down: bool,
+    tx: Sender<TriggerEvent>,
+}
+
+impl KeyboardHookState {
+    /// Handles one key transition, returning whether the event must be swallowed.
+    fn handle_key(&mut self, vk: u32, is_down: bool) -> bool {
+        if vk != self.vk {
+            return false;
+        }
+
+        if !is_down {
+            self.key_down = false;
+            return false;
+        }
+
+        // Auto-repeat while the key is held must not fire a second trigger.
+        if self.key_down {
+            return true;
+        }
+        self.key_down = true;
+
+        if current_modifiers() != self.modifiers {
+            return false;
+        }
+
+        let (cursor_x, cursor_y) = get_current_cursor_pos();
+        let _ = self.tx.send(TriggerEvent {
+            source: TriggerSource::Hotkey,
+            cursor_x,
+            cursor_y,
+        });
+        true
+    }
+}
+
+/// Keyboard hook state shared with the hook callback.
+static KEYBOARD_HOOK_STATE: Mutex<Option<KeyboardHookState>> = Mutex::new(None);
+
+/// Low-level keyboard hook callback installed with `WH_KEYBOARD_LL`.
+///
+/// SAFETY: the system calls this with `code >= 0` guarding a valid
+/// `KBDLLHOOKSTRUCT` behind `lparam`, which is only dereferenced after that check.
+unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        let message = wparam.0 as u32;
+        let is_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+        let is_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+        let info = lparam.0 as *const KBDLLHOOKSTRUCT;
+
+        if (is_down || is_up) && !info.is_null() {
+            // SAFETY: the Windows hook contract guarantees a valid KBDLLHOOKSTRUCT
+            // pointer for WH_KEYBOARD_LL while the callback runs.
+            let vk = unsafe { (*info).vkCode };
+
+            // try_lock keeps a stalled worker from blocking the whole keyboard.
+            if let Ok(mut guard) = KEYBOARD_HOOK_STATE.try_lock() {
+                if let Some(state) = guard.as_mut() {
+                    if state.handle_key(vk, is_down) {
+                        // Swallow the shortcut so it does not also reach the app
+                        // that made RegisterHotKey refuse the combination.
+                        return LRESULT(1);
+                    }
+                }
+            }
+        }
+    }
+
+    // SAFETY: forwarding is mandatory; there is no ownership of the arguments.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Owns the keyboard hook thread used when every `RegisterHotKey` attempt fails.
+#[derive(Debug)]
+pub struct KeyboardHookHandle {
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+    thread_id: u32,
+}
+
+impl KeyboardHookHandle {
+    /// Watches `definition` through `WH_KEYBOARD_LL` on a dedicated thread.
+    ///
+    /// Returns `None` when the thread cannot be spawned or the hook cannot be
+    /// installed, in which case the tray click remains as the activation path.
+    pub fn start(definition: &HotkeyDefinition, tx: Sender<TriggerEvent>) -> Option<Self> {
+        let modifiers = definition.modifiers & !MOD_NOREPEAT.0;
+        let vk = definition.vk;
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<(u32, bool)>();
+
+        let thread_handle = std::thread::Builder::new()
+            .name("magic-cursor-keyboard-hook".to_string())
+            .spawn(move || run_keyboard_hook_thread(modifiers, vk, tx, &ready_tx))
+            .ok()?;
+
+        let (thread_id, installed) = ready_rx.recv().ok()?;
+        if !installed {
+            let _ = thread_handle.join();
+            return None;
+        }
+
+        Some(Self {
+            thread_handle: Some(thread_handle),
+            thread_id,
+        })
+    }
+}
+
+impl Drop for KeyboardHookHandle {
+    fn drop(&mut self) {
+        if self.thread_id != 0 {
+            // SAFETY: the id belongs to the worker thread, which owns a message
+            // queue that this WM_QUIT ends.
+            unsafe {
+                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+        }
+
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Body of the keyboard hook thread: install the hook, pump messages, unhook.
+fn run_keyboard_hook_thread(
+    modifiers: u32,
+    vk: u32,
+    tx: Sender<TriggerEvent>,
+    ready: &Sender<(u32, bool)>,
+) {
+    // SAFETY: GetCurrentThreadId has no preconditions and identifies this thread.
+    let thread_id = unsafe { GetCurrentThreadId() };
+
+    // SAFETY: the callback outlives the hook because the hook is removed before
+    // this thread returns, and a global hook accepts a null module handle.
+    let hook: HHOOK =
+        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0) }
+            .unwrap_or_default();
+
+    if hook.is_invalid() {
+        eprintln!("[MagicCursor] Failed to install the low-level keyboard hook");
+        let _ = ready.send((thread_id, false));
+        return;
+    }
+
+    *KEYBOARD_HOOK_STATE
+        .lock()
+        .expect("keyboard hook state lock poisoned") = Some(KeyboardHookState {
+        modifiers,
+        vk,
+        key_down: false,
+        tx,
+    });
+    let _ = ready.send((thread_id, true));
+
+    let mut message = MSG::default();
+    // SAFETY: standard message pump; the hook thread has its own queue.
+    unsafe {
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        let _ = UnhookWindowsHookEx(hook);
+    }
+
+    *KEYBOARD_HOOK_STATE
+        .lock()
+        .expect("keyboard hook state lock poisoned") = None;
 }
 
 /// One recorded cursor position.
@@ -578,6 +799,48 @@ mod tests {
 
         assert_eq!(f5.vk, u32::from(VK_F1.0) + 4);
         assert_eq!(space.vk, u32::from(VK_SPACE.0));
+    }
+
+    #[test]
+    fn fallback_shortcuts_use_space_without_win() {
+        let alt_space = HotkeyDefinition::alt_space();
+        let ctrl_shift_space = HotkeyDefinition::ctrl_shift_space();
+
+        assert_eq!(alt_space.vk, u32::from(VK_SPACE.0));
+        assert_eq!(alt_space.modifiers, MOD_ALT.0 | MOD_NOREPEAT.0);
+        assert_eq!(ctrl_shift_space.vk, u32::from(VK_SPACE.0));
+        assert_eq!(
+            ctrl_shift_space.modifiers,
+            MOD_CONTROL.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0
+        );
+    }
+
+    #[test]
+    fn keyboard_hook_fires_once_per_press() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = KeyboardHookState {
+            modifiers: 0,
+            vk: vk_for_char('G'),
+            key_down: false,
+            tx,
+        };
+
+        assert!(
+            state.handle_key(vk_for_char('G'), true),
+            "first press fires"
+        );
+        assert!(
+            state.handle_key(vk_for_char('G'), true),
+            "repeat is swallowed"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "the first press must emit exactly one trigger"
+        );
+        assert!(rx.try_recv().is_err(), "auto-repeat must not emit again");
+
+        assert!(!state.handle_key(vk_for_char('G'), false), "release passes");
+        assert!(!state.handle_key(vk_for_char('H'), true), "other keys pass");
     }
 
     #[test]

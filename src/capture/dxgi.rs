@@ -587,6 +587,9 @@ pub fn capture_full_screen() -> Option<CapturedFrame> {
         return Some(frame);
     }
 
+    // Duplication is refused on hybrid GPUs, RDP, and virtual displays; GDI
+    // BitBlt keeps the overlay working in those sessions instead of aborting.
+    eprintln!("[magic-cursor] DXGI duplication unavailable; falling back to GDI BitBlt");
     let screen = VirtualScreen::current();
     capture_screen_gdi(screen.x, screen.y, screen.width, screen.height)
 }

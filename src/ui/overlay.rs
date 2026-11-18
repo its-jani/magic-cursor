@@ -1167,6 +1167,16 @@ pub fn show_magic_overlay(request: OverlayRequest) {
         Box::new(move |_cc| Ok(Box::new(OverlayApp::new(request)))),
     ) {
         eprintln!("[magic-cursor] overlay window failed: {error}");
+        // A windows-subsystem process has no console, so a fatal graphics
+        // failure (no OpenGL/D3D context, RDP session, blocked GPU) must be
+        // surfaced with a native message box instead of dying silently.
+        super::dialog::show_error(&format!(
+            "Magic Cursor could not open the overlay window.\n\n\
+             Graphics error: {error}\n\n\
+             This can happen on remote desktop sessions or when the GPU driver \
+             refuses a rendering context. The tray icon keeps working; try \
+             again after updating your graphics driver."
+        ));
     }
 }
 

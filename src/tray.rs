@@ -29,6 +29,8 @@ pub const ID_TRAY_OPEN_CONFIG: usize = 1003;
 pub const ID_TRAY_OPEN_FOLDER: usize = 1004;
 /// Menu command id that exits the application.
 pub const ID_TRAY_EXIT: usize = 1005;
+/// Menu command id that opens the settings / API key window.
+pub const ID_TRAY_SETTINGS: usize = 1006;
 
 /// Identifier of the icon inside the message window, used by the shell callbacks.
 const ICON_UID: u32 = 1;
@@ -167,10 +169,16 @@ impl TrayIcon {
                 menu.0,
                 MF_STRING,
                 ID_TRAY_TRIGGER,
-                w!("✨ Trigger MagicCursor"),
+                w!("🪄 Activate Magic Pointer Now"),
             );
             let _ = AppendMenuW(menu.0, pause_flags, ID_TRAY_TOGGLE_PAUSE, pause_label);
             let _ = AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                menu.0,
+                MF_STRING,
+                ID_TRAY_SETTINGS,
+                w!("⚙ Settings / API Key…"),
+            );
             let _ = AppendMenuW(
                 menu.0,
                 MF_STRING,
