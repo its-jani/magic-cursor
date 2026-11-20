@@ -37,6 +37,6 @@
   "author": "MagicCursor Team",
   "repository": {
     "type": "git",
-    "url": "https://github.com/its-jani/magic-cursor"
+    "url": "git+https://github.com/its-jani/magic-cursor.git"
   }
 }
